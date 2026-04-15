@@ -111,8 +111,8 @@ const int WEB_SERVER_PORT = 80;
 // -- OTA firmware update ------------------------------------------------------
 // Increment FW_VERSION, then run push_firmware.ps1 to publish a new release.
 // The Arduino polls GitHub every OTA_CHECK_INTERVAL_MS milliseconds.
-#define FW_VERSION            5
-#define FW_VERSION_STR        "5"
+#define FW_VERSION            6
+#define FW_VERSION_STR        "6"
 #define OTA_CHECK_INTERVAL_MS (5UL * 60UL * 1000UL)  // 5 minutes
 
 // ============================================================
@@ -675,10 +675,23 @@ void checkForOTAUpdate() {
   }
   Serial.println(F("[OTA] Checking for firmware update..."));
 
+  // DNS check before attempting SSL connection
+  IPAddress resolvedIP;
+  if (WiFi.hostByName("raw.githubusercontent.com", resolvedIP) != 1) {
+    Serial.println(F("[OTA] DNS failed – cannot resolve raw.githubusercontent.com"));
+    Serial.println(F("[OTA] Check hotspot has internet access and DNS is reachable."));
+    return;
+  }
+  Serial.print(F("[OTA] DNS OK – raw.githubusercontent.com -> "));
+  Serial.println(resolvedIP);
+
   // Step 1: fetch ota/version.txt from GitHub
   WiFiSSLClient ssl;
+  ssl.setTimeout(10000);
   if (!ssl.connect("raw.githubusercontent.com", 443)) {
-    Serial.println(F("[OTA] Version check: HTTPS connect failed."));
+    Serial.print(F("[OTA] HTTPS connect failed to "));
+    Serial.println(resolvedIP);
+    Serial.println(F("[OTA] Hotspot may be blocking port 443, or SSL handshake timed out."));
     return;
   }
   ssl.print(F("GET /" OTA_GH_USER "/" OTA_GH_REPO "/" OTA_GH_BRANCH "/ota/version.txt"
