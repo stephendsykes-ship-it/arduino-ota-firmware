@@ -116,8 +116,8 @@ const int WEB_SERVER_PORT = 80;
 // -- OTA firmware update ------------------------------------------------------
 // Increment FW_VERSION, then run push_firmware.ps1 to publish a new release.
 // The Arduino polls GitHub every OTA_CHECK_INTERVAL_MS milliseconds.
-#define FW_VERSION            7
-#define FW_VERSION_STR        "7"
+#define FW_VERSION            8
+#define FW_VERSION_STR        "8"
 #define OTA_CHECK_INTERVAL_MS (5UL * 60UL * 1000UL)  // 5 minutes
 
 // ============================================================
@@ -199,7 +199,9 @@ float readStallCurrentAmps() {
 // ============================================================
 //  SERVO CONTROL
 // ============================================================
-void startServo(uint16_t pulseUs) {
+void startServo(uint16_t pulseUs, const __FlashStringHelper* reason) {
+  Serial.print(F("[Servo] START – "));
+  Serial.println(reason);
   pwm.writeMicroseconds(SERVO_CHANNEL, pulseUs);
   servoMoveStart = millis();
   stallDetected  = false;           // clear stall flag on each new rotation
@@ -211,8 +213,18 @@ void stopServo() {
   pwm.writeMicroseconds(SERVO_CHANNEL, (uint16_t)stopUs);
 }
 
+// Re-send the stop pulse periodically while idle to recover from I2C glitches
+void refreshStopPulse() {
+  static unsigned long lastRefresh = 0;
+  if (servoState == SERVO_IDLE && millis() - lastRefresh >= 500) {
+    lastRefresh = millis();
+    stopServo();
+  }
+}
+
 // Call every loop iteration – handles timed stop without blocking
 void updateServo() {
+  refreshStopPulse();   // guard against PCA9685 I2C glitch while idle
   if (servoState == SERVO_IDLE) return;
 
   // Blink LED at 4 Hz while motor is running
@@ -256,7 +268,7 @@ void updateThresholdLogic() {
   if (!triggerActive && measuredCurrent >= risingEdge) {
     triggerActive = true;
     servoState    = SERVO_ROTATING_FORWARD;
-    startServo(SERVO_FORWARD_US);
+    startServo(SERVO_FORWARD_US, F("threshold ABOVE – FWD"));
     Serial.print("[Trigger] Current ABOVE threshold (");
     Serial.print(measuredCurrent, 3);
     Serial.println(" A) – rotating FORWARD 360°");
@@ -264,7 +276,7 @@ void updateThresholdLogic() {
   else if (triggerActive && measuredCurrent < fallingEdge) {
     triggerActive = false;
     servoState    = SERVO_ROTATING_REVERSE;
-    startServo(SERVO_REVERSE_US);
+    startServo(SERVO_REVERSE_US, F("threshold BELOW – REV"));
     Serial.print("[Trigger] Current BELOW threshold (");
     Serial.print(measuredCurrent, 3);
     Serial.println(" A) – rotating REVERSE 360°");
@@ -367,10 +379,10 @@ void handleCommandRequest(WiFiClient& client, const String& query) {
     simMode = false;
   } else if (c == "FWD") {
     servoState = SERVO_ROTATING_FORWARD;
-    startServo(SERVO_FORWARD_US);
+    startServo(SERVO_FORWARD_US, F("web cmd FWD"));
   } else if (c == "REV") {
     servoState = SERVO_ROTATING_REVERSE;
-    startServo(SERVO_REVERSE_US);
+    startServo(SERVO_REVERSE_US, F("web cmd REV"));
   } else if (c == "STOP") {
     stopServo();
     servoState = SERVO_IDLE;
@@ -597,10 +609,10 @@ void parseSerialCommands() {
     simMode = false;
   } else if (cmd == "FWD") {
     servoState = SERVO_ROTATING_FORWARD;
-    startServo(SERVO_FORWARD_US);
+    startServo(SERVO_FORWARD_US, F("serial cmd FWD"));
   } else if (cmd == "REV") {
     servoState = SERVO_ROTATING_REVERSE;
-    startServo(SERVO_REVERSE_US);
+    startServo(SERVO_REVERSE_US, F("serial cmd REV"));
   } else if (cmd == "STOP") {
     stopServo();
     servoState = SERVO_IDLE;
