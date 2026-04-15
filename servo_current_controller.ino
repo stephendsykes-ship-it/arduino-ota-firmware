@@ -111,8 +111,8 @@ const int WEB_SERVER_PORT = 80;
 // -- OTA firmware update ------------------------------------------------------
 // Increment FW_VERSION, then run push_firmware.ps1 to publish a new release.
 // The Arduino polls GitHub every OTA_CHECK_INTERVAL_MS milliseconds.
-#define FW_VERSION            3
-#define FW_VERSION_STR        "3"
+#define FW_VERSION            4
+#define FW_VERSION_STR        "4"
 #define OTA_CHECK_INTERVAL_MS (5UL * 60UL * 1000UL)  // 5 minutes
 
 // ============================================================
@@ -300,6 +300,8 @@ void writeStatus(Print& out) {
   out.print(stallDetectEnabled ? F("true") : F("false"));
   out.print(F(",\"stall_thresh\":"));
   out.print(STALL_CURRENT_A, 3);
+  out.print(F(",\"fw\":"));
+  out.print(FW_VERSION);
   out.println(F("}")); 
 }
 
