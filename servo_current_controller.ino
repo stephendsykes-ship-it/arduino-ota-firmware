@@ -93,7 +93,17 @@ int16_t SERVO_STOP_TRIM_US = 0;
 // revolution, then set ROTATION_MS to that value.
 // Quick guide: run the servo at full speed and time 10 revolutions, divide by 10.
 // A typical 60 RPM servo: 60 000 ms / 60 RPM = 1 000 ms per revolution.
-const unsigned long ROTATION_MS = 1000;  // milliseconds for ONE 360° turn
+// Calibrated: was 1000 ms → 540°; scaled to 667 ms → 360°.
+const unsigned long ROTATION_MS = 667;   // milliseconds for ONE 360° turn
+
+// -- Stall detection (testing) -----------------------------------------------
+// When enabled, the servo stops immediately if measured current exceeds
+// STALL_CURRENT_A after the STALL_IGNORE_MS spin-up grace period.
+// Requires the ACS723 to be sensing the servo motor supply current.
+// Toggle at runtime:   STALL_ON / STALL_OFF  (serial or web /cmd)
+// Adjust threshold:    STALL_THRESH <amps>
+// Clear flag:          STALL_CLEAR
+const unsigned long STALL_IGNORE_MS = 150;  // ms – ignore stall during motor spin-up surge
 
 // -- Web server --------------------------------------------------------------
 const int WEB_SERVER_PORT = 80;
@@ -101,8 +111,8 @@ const int WEB_SERVER_PORT = 80;
 // -- OTA firmware update ------------------------------------------------------
 // Increment FW_VERSION, then run push_firmware.ps1 to publish a new release.
 // The Arduino polls GitHub every OTA_CHECK_INTERVAL_MS milliseconds.
-#define FW_VERSION            2
-#define FW_VERSION_STR        "2"
+#define FW_VERSION            3
+#define FW_VERSION_STR        "3"
 #define OTA_CHECK_INTERVAL_MS (5UL * 60UL * 1000UL)  // 5 minutes
 
 // ============================================================
@@ -136,6 +146,11 @@ float            humidity2_pct     = NAN;
 bool  simMode    = false;   // true = bypass ADC, use simCurrent
 float simCurrent = 0.0f;   // injected current value (amps)
 
+// ── Stall detection ──────────────────────────────────────────────────────────
+bool  stallDetectEnabled = false;
+bool  stallDetected      = false;
+float STALL_CURRENT_A    = 0.8f;   // amps – reduce until stalls are caught reliably
+
 // ── Door State (updated when timed servo rotation completes) ────────────────
 enum DoorState { DOOR_UNKNOWN, DOOR_OPEN, DOOR_CLOSED };
 DoorState doorState = DOOR_UNKNOWN;
@@ -168,6 +183,7 @@ float readCurrentAmps() {
 void startServo(uint16_t pulseUs) {
   pwm.writeMicroseconds(SERVO_CHANNEL, pulseUs);
   servoMoveStart = millis();
+  stallDetected  = false;           // clear stall flag on each new rotation
   digitalWrite(LED_BUILTIN, HIGH);  // LED on while motor runs
 }
 
@@ -183,6 +199,20 @@ void updateServo() {
   // Blink LED at 4 Hz while motor is running
   if ((millis() / 125) % 2 == 0) digitalWrite(LED_BUILTIN, HIGH);
   else                            digitalWrite(LED_BUILTIN, LOW);
+
+  // Stall detection – fires after spin-up grace period
+  if (stallDetectEnabled && (millis() - servoMoveStart >= STALL_IGNORE_MS)) {
+    if (measuredCurrent >= STALL_CURRENT_A) {
+      stopServo();
+      servoState    = SERVO_IDLE;
+      stallDetected = true;
+      digitalWrite(LED_BUILTIN, LOW);
+      Serial.print(F("[Stall] Detected at "));
+      Serial.print(measuredCurrent, 3);
+      Serial.println(F(" A – servo stopped."));
+      return;
+    }
+  }
 
   if (millis() - servoMoveStart >= ROTATION_MS) {
     if (servoState == SERVO_ROTATING_FORWARD) doorState = DOOR_OPEN;
@@ -261,7 +291,16 @@ void writeStatus(Print& out) {
   out.print(HYSTERESIS_A, 3);
   out.print(F(",\"door\":\""));
   out.print(doorStateLabel());
-  out.println(F("\"}"));
+  out.print(F("\",\"ip\":\""));
+  if (WiFi.status() == WL_CONNECTED) out.print(WiFi.localIP());
+  else                                out.print(F("none"));
+  out.print(F("\",\"stall\":"));
+  out.print(stallDetected ? F("true") : F("false"));
+  out.print(F(",\"stall_detect\":"));
+  out.print(stallDetectEnabled ? F("true") : F("false"));
+  out.print(F(",\"stall_thresh\":"));
+  out.print(STALL_CURRENT_A, 3);
+  out.println(F("}")); 
 }
 
 // ============================================================
@@ -315,6 +354,15 @@ void handleCommandRequest(WiFiClient& client, const String& query) {
   } else if (c == "TRIM") {
     SERVO_STOP_TRIM_US = (int16_t)v.toInt();
     stopServo();
+  } else if (c == "STALL_ON") {
+    stallDetectEnabled = true;
+    stallDetected      = false;
+  } else if (c == "STALL_OFF") {
+    stallDetectEnabled = false;
+  } else if (c == "STALL_THRESH") {
+    STALL_CURRENT_A = v.toFloat();
+  } else if (c == "STALL_CLEAR") {
+    stallDetected = false;
   } else if (c == "OTA") {
     otaCheckRequested = true;
     // Respond immediately; check runs on next loop iteration
@@ -533,6 +581,15 @@ void parseSerialCommands() {
   } else if (cmd == "STOP") {
     stopServo();
     servoState = SERVO_IDLE;
+  } else if (cmd == "STALL_ON") {
+    stallDetectEnabled = true;
+    stallDetected      = false;
+  } else if (cmd == "STALL_OFF") {
+    stallDetectEnabled = false;
+  } else if (cmd.startsWith("STALL_THRESH ")) {
+    STALL_CURRENT_A = cmd.substring(13).toFloat();
+  } else if (cmd == "STALL_CLEAR") {
+    stallDetected = false;
   } else if (cmd == "WIFI") {
     printWiFiStatus();
     return;   // skip status echo
