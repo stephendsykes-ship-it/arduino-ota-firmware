@@ -26,6 +26,7 @@
 #include <Adafruit_PWMServoDriver.h>
 #include <WiFiS3.h>
 #include <OTAUpdate.h>
+#include <EEPROM.h>
 #include "secrets.h"
 
 // ── Future DHT sensor support (uncomment all DHT lines when ready) ──────────
@@ -90,8 +91,30 @@ const uint16_t SERVO_REVERSE_US = 2000;
 
 // Fine-tune the stop pulse if the servo creeps at idle.
 // Positive = shift stop pulse higher (µs), negative = lower.
-// Adjust via the GUI TRIM command without reflashing.
+// Adjust via the GUI TRIM command – value is saved to EEPROM automatically.
 int16_t SERVO_STOP_TRIM_US = 0;
+
+// EEPROM layout: bytes 0-1 = int16_t trim value, byte 2 = 0xAB magic marker
+#define EEPROM_ADDR_TRIM  0
+#define EEPROM_MAGIC_ADDR 2
+#define EEPROM_MAGIC      0xAB
+
+void saveTrimToEEPROM() {
+  EEPROM.put(EEPROM_ADDR_TRIM, SERVO_STOP_TRIM_US);
+  EEPROM.write(EEPROM_MAGIC_ADDR, EEPROM_MAGIC);
+  Serial.print(F("[EEPROM] Trim saved: "));
+  Serial.println(SERVO_STOP_TRIM_US);
+}
+
+void loadTrimFromEEPROM() {
+  if (EEPROM.read(EEPROM_MAGIC_ADDR) == EEPROM_MAGIC) {
+    EEPROM.get(EEPROM_ADDR_TRIM, SERVO_STOP_TRIM_US);
+    Serial.print(F("[EEPROM] Trim loaded: "));
+    Serial.println(SERVO_STOP_TRIM_US);
+  } else {
+    Serial.println(F("[EEPROM] No saved trim – using default 0."));
+  }
+}
 
 // *** CALIBRATION REQUIRED ***
 // Measure how long (ms) your specific servo takes to spin exactly one full
@@ -116,8 +139,8 @@ const int WEB_SERVER_PORT = 80;
 // -- OTA firmware update ------------------------------------------------------
 // Increment FW_VERSION, then run push_firmware.ps1 to publish a new release.
 // The Arduino polls GitHub every OTA_CHECK_INTERVAL_MS milliseconds.
-#define FW_VERSION            8
-#define FW_VERSION_STR        "8"
+#define FW_VERSION            9
+#define FW_VERSION_STR        "9"
 #define OTA_CHECK_INTERVAL_MS (5UL * 60UL * 1000UL)  // 5 minutes
 
 // ============================================================
@@ -389,6 +412,7 @@ void handleCommandRequest(WiFiClient& client, const String& query) {
   } else if (c == "TRIM") {
     SERVO_STOP_TRIM_US = (int16_t)v.toInt();
     stopServo();
+    saveTrimToEEPROM();
   } else if (c == "STALL_ON") {
     stallDetectEnabled = true;
     stallDetected      = false;
@@ -605,6 +629,7 @@ void parseSerialCommands() {
   } else if (cmd.startsWith("TRIM ")) {
     SERVO_STOP_TRIM_US = (int16_t)cmd.substring(5).toInt();
     stopServo();
+    saveTrimToEEPROM();
   } else if (cmd == "SIM_OFF") {
     simMode = false;
   } else if (cmd == "FWD") {
@@ -652,6 +677,9 @@ void setup() {
   Serial.begin(115200);
   delay(500);
   Serial.println("\n=== Servo Current Controller (Arduino Uno R4 WiFi) ===");
+
+  // Load persisted trim value before initialising the servo
+  loadTrimFromEEPROM();
 
   // PWM shield – initialise and centre the servo before anything moves
   Wire.begin();
