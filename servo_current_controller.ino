@@ -41,7 +41,7 @@
 //  USER CONFIGURATION  (adjust these values for your hardware)
 // ============================================================
 
-// -- ACS723 current sensor ---------------------------------------------------
+// -- ACS723 current sensor (main – circuit under test) ----------------------
 const int   CURRENT_SENSOR_PIN  = A0;
 
 // ACS723 sensitivity – pick the line that matches your part number:
@@ -56,6 +56,11 @@ const float SENSOR_VCC          = 3.3;     // volts
 
 // ACS723 quiescent output at 0 A = VCC / 2 for bidirectional variants
 const float ZERO_CURRENT_V      = SENSOR_VCC / 2.0;
+
+// -- ACS723 stall sensor (servo motor supply rail) ---------------------------
+const int   STALL_SENSOR_PIN    = A1;
+const float STALL_SENSITIVITY_VA = 0.800;  // ACS723LLCTR-05AB → 0.800 V/A
+// Uses same VCC and zero-current reference as the main sensor
 
 // Hysteresis prevents chattering near the threshold.
 // Example: threshold = 1.0 A, hysteresis = 0.05 A
@@ -111,8 +116,8 @@ const int WEB_SERVER_PORT = 80;
 // -- OTA firmware update ------------------------------------------------------
 // Increment FW_VERSION, then run push_firmware.ps1 to publish a new release.
 // The Arduino polls GitHub every OTA_CHECK_INTERVAL_MS milliseconds.
-#define FW_VERSION            6
-#define FW_VERSION_STR        "6"
+#define FW_VERSION            7
+#define FW_VERSION_STR        "7"
 #define OTA_CHECK_INTERVAL_MS (5UL * 60UL * 1000UL)  // 5 minutes
 
 // ============================================================
@@ -149,7 +154,8 @@ float simCurrent = 0.0f;   // injected current value (amps)
 // ── Stall detection ──────────────────────────────────────────────────────────
 bool  stallDetectEnabled = false;
 bool  stallDetected      = false;
-float STALL_CURRENT_A    = 0.8f;   // amps – reduce until stalls are caught reliably
+float STALL_CURRENT_A    = 0.5f;   // amps – tune while watching stall_current in GUI
+float stallCurrent       = 0.0f;   // latest reading from the stall sensor (A1)
 
 // ── Door State (updated when timed servo rotation completes) ────────────────
 enum DoorState { DOOR_UNKNOWN, DOOR_OPEN, DOOR_CLOSED };
@@ -172,9 +178,22 @@ float readCurrentAmps() {
     delayMicroseconds(200);
   }
   float avgAdc  = (float)accumulator / ADC_SAMPLES;
-  float voltage = (avgAdc / 16383.0f) * SENSOR_VCC;     // 14-bit → 0..16383
+  float voltage = (avgAdc / 16383.0f) * SENSOR_VCC;
   float current = (voltage - ZERO_CURRENT_V) / SENSITIVITY_VA;
   return current;
+}
+
+// Dedicated stall sensor read – always reads the real ADC (not simulated)
+float readStallCurrentAmps() {
+  analogReadResolution(14);
+  long accumulator = 0;
+  for (int i = 0; i < ADC_SAMPLES; i++) {
+    accumulator += analogRead(STALL_SENSOR_PIN);
+    delayMicroseconds(200);
+  }
+  float avgAdc  = (float)accumulator / ADC_SAMPLES;
+  float voltage = (avgAdc / 16383.0f) * SENSOR_VCC;
+  return (voltage - ZERO_CURRENT_V) / STALL_SENSITIVITY_VA;
 }
 
 // ============================================================
@@ -200,16 +219,16 @@ void updateServo() {
   if ((millis() / 125) % 2 == 0) digitalWrite(LED_BUILTIN, HIGH);
   else                            digitalWrite(LED_BUILTIN, LOW);
 
-  // Stall detection – fires after spin-up grace period
+  // Stall detection – reads dedicated ACS723 on A1, fires after grace period
   if (stallDetectEnabled && (millis() - servoMoveStart >= STALL_IGNORE_MS)) {
-    if (measuredCurrent >= STALL_CURRENT_A) {
+    if (stallCurrent >= STALL_CURRENT_A) {
       stopServo();
       servoState    = SERVO_IDLE;
       stallDetected = true;
       digitalWrite(LED_BUILTIN, LOW);
       Serial.print(F("[Stall] Detected at "));
-      Serial.print(measuredCurrent, 3);
-      Serial.println(F(" A – servo stopped."));
+      Serial.print(stallCurrent, 3);
+      Serial.println(F(" A (A1) – servo stopped."));
       return;
     }
   }
@@ -300,6 +319,8 @@ void writeStatus(Print& out) {
   out.print(stallDetectEnabled ? F("true") : F("false"));
   out.print(F(",\"stall_thresh\":"));
   out.print(STALL_CURRENT_A, 3);
+  out.print(F(",\"stall_current\":"));
+  out.print(stallCurrent, 3);
   out.print(F(",\"fw\":"));
   out.print(FW_VERSION);
   out.println(F("}")); 
@@ -918,8 +939,9 @@ void loop() {
   // 1. Process incoming debug/GUI commands
   parseSerialCommands();
 
-  // 2. Read sensor
+  // 2. Read sensors
   measuredCurrent = readCurrentAmps();
+  stallCurrent    = readStallCurrentAmps();   // dedicated ACS723 on A1
 
   // 3. Update DHT readings (uncomment when sensors are wired)
   // temp1_C      = dht1.readTemperature();
